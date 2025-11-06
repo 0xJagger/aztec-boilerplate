@@ -115,7 +115,7 @@ jobs:
           VERSION=${{ steps.basever.outputs.ver }} aztec-up
 
       - name: Start sandbox (BASE, background)
-        run: aztec start --sandbox &
+        run: VERSION=${{ steps.basever.outputs.ver }} aztec start --sandbox &
 
       - name: Start PXE node (BASE, background)
         run: |
@@ -183,7 +183,9 @@ jobs:
 
       - name: Start sandbox (PR, background)
         if: steps.prver.outputs.ver_diff == 'true'
-        run: aztec start --sandbox &
+        run: |
+          VERSION=${{ steps.prver.outputs.ver }} aztec start --sandbox &
+          sleep 60
 
       - name: Start PXE node (PR, background)
         if: steps.prver.outputs.ver_diff == 'true'
