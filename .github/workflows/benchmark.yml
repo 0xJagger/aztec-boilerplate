@@ -1,8 +1,16 @@
-name: Aztec Benchmark
+name: Aztec Benchmark Diff
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
 
 env:
   BENCH_DIR: ./benchmarks
@@ -59,13 +67,14 @@ jobs:
     needs: check-changes
     if: needs.check-changes.outputs.should-benchmark == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       # ──────────────────────────────────────────────────────────────
       # 0️⃣  SHARED TOOLING – Buildx + Aztec CLI skeleton
       # ──────────────────────────────────────────────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v5
+      - name: Checkout repo (full history)
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -86,9 +95,13 @@ jobs:
       # 1️⃣  BENCHMARK BASE COMMIT
       # ──────────────────────────────────────────────────────────────
       - name: Checkout BASE branch
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.17.0"
 
       - name: Detect Aztec version (BASE)
         id: basever
@@ -102,25 +115,16 @@ jobs:
           VERSION=${{ steps.basever.outputs.ver }} aztec-up
 
       - name: Start sandbox (BASE, background)
-        run: VERSION=${{ steps.basever.outputs.ver }} aztec start --sandbox &
+        run: aztec start --sandbox &
 
       - name: Start PXE node (BASE, background)
         run: |
-          VERSION=${{ steps.basever.outputs.ver }} aztec start \
-            --port 8081 --pxe --pxe.nodeUrl=http://localhost:8080/ \
+          VERSION=${{ steps.basever.outputs.ver }} aztec \
+            start --port 8081 --pxe --pxe.nodeUrl=http://localhost:8080/ \
             --pxe.proverEnabled false &
       
       - name: Install deps (BASE)
-        run: yarn install --frozen-lockfile
-
-      - name: Cache Noir compilation artifacts (BASE)
-        id: cache-noir-base
-        uses: actions/cache@v4
-        with:
-          path: |
-            target/
-            src/artifacts/
-          key: ${{ runner.os }}-noir-${{ steps.basever.outputs.ver }}-${{ hashFiles('src/nr/**/*', 'Nargo.toml') }}
+        run: yarn --frozen-lockfile
 
       - name: Compile contracts (BASE)
         run: yarn compile
@@ -135,7 +139,7 @@ jobs:
       # This is required to avoid the benchmark results being removed by the Checkout PR step
       - name: Store base benchmark results
         run: |
-          mkdir -p ../benchmarks_base && mv ${{ env.BENCH_DIR }}/* ../benchmarks_base/
+          mkdir -p ../benchmarks_base && mv ${{ env.BENCH_DIR }}/*.json ../benchmarks_base/
 
       # ──────────────────────────────────────────────────────────────
       # 2️⃣  BENCHMARK PR HEAD  (github.event.pull_request.head.sha)
@@ -144,7 +148,7 @@ jobs:
       # clean does not work correctly and is removing the benchmark results anyways
       # https://github.com/actions/checkout/issues/1201
       - name: Checkout PR branch
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           clean: false
@@ -179,15 +183,13 @@ jobs:
 
       - name: Start sandbox (PR, background)
         if: steps.prver.outputs.ver_diff == 'true'
-        run: |
-          VERSION=${{ steps.prver.outputs.ver }} aztec start --sandbox &
-          sleep 60
+        run: aztec start --sandbox &
 
       - name: Start PXE node (PR, background)
         if: steps.prver.outputs.ver_diff == 'true'
         run: |
-          VERSION=${{ steps.prver.outputs.ver }} aztec start \
-            --port 8081 --pxe --pxe.nodeUrl=http://localhost:8080/ \
+          VERSION=${{ steps.prver.outputs.ver }} aztec \
+            start --port 8081 --pxe --pxe.nodeUrl=http://localhost:8080/ \
             --pxe.proverEnabled false &
 
       # This is a temporary hack to fix a problem with v3 releases.
@@ -199,16 +201,7 @@ jobs:
       #   run: rm -rf node_modules yarn.lock
 
       - name: Install deps (PR)
-        run: yarn install --frozen-lockfile
-
-      - name: Cache Noir compilation artifacts (PR)
-        id: cache-noir-pr
-        uses: actions/cache@v4
-        with:
-          path: |
-            target/
-            src/artifacts/
-          key: ${{ runner.os }}-noir-${{ steps.prver.outputs.ver }}-${{ hashFiles('src/nr/**/*', 'Nargo.toml') }}
+        run: yarn --frozen-lockfile
 
       - name: Compile contracts (PR)
         run: yarn compile
@@ -217,31 +210,16 @@ jobs:
         run: yarn codegen
 
       # ──────────────────────────────────────────────────────────────
-      # 3️⃣  DIFF &  UPLOAD ARTIFACTS
+      # 3️⃣  DIFF &  COMMENT
       # ──────────────────────────────────────────────────────────────
-
-      - name: Generate benchmark comparison
+      - name: Generate Markdown diff
         uses: defi-wonderland/aztec-benchmark/action@main
         with:
           base_suffix: '_base'
           current_suffix: '_pr'
 
-      # SECURITY: Upload results for secure comment workflow
-      - name: Upload benchmark results and metadata
-        uses: actions/upload-artifact@v4
+      - name: Comment diff
+        uses: peter-evans/create-or-update-comment@v4
         with:
-          name: benchmark-results
-          path: |
-            benchmark-comparison.md
-          retention-days: 1
-
-      - name: Save PR number for comment workflow
-        run: |
-          echo "${{ github.event.number }}" > pr-number.txt
-
-      - name: Upload PR metadata
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-metadata
-          path: pr-number.txt
-          retention-days: 1
+          issue-number: ${{ github.event.pull_request.number }}
+          body-file: benchmark-comparison.md
